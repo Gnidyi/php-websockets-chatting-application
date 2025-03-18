@@ -6,7 +6,7 @@ class ChatRooms
 	private $user_id;
 	private $message;
 	private $created_on;
-	protected $connect;
+	private $connect;
 
 	public function setChatId($chat_id)
 	{
@@ -47,6 +47,10 @@ class ChatRooms
 	{
 		return $this->created_on;
 	}
+
+    public function getConnection() {
+        return $this->connect;
+    }
 
 	public function __construct()
 	{
@@ -91,6 +95,107 @@ class ChatRooms
 
 		return $statement->fetchAll(PDO::FETCH_ASSOC);
 	}
+
+    function getEnvVar($key) {
+        if (!file_exists(__DIR__ . '/.env')) {
+            return null;
+        }
+
+        $lines = file(__DIR__ . '/.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            list($envKey, $envValue) = explode('=', $line, 2);
+            if (trim($envKey) === $key) {
+                return trim($envValue);
+            }
+        }
+
+        return null;
+    }
+
+    function is_toxic($message) {
+        $apiKey = $this->getEnvVar('API_KEY');
+        $url = "https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze?key=" . $apiKey;
+
+        $data = [
+            'comment' => ['text' => $message],
+            'languages' => ['en'],
+            'requestedAttributes' => ['TOXICITY' => new stdClass()]
+        ];
+
+        $options = [
+            'http' => [
+                'header'  => "Content-type: application/json\r\n",
+                'method'  => 'POST',
+                'content' => json_encode($data)
+            ]
+        ];
+        $context  = stream_context_create($options);
+        $result = file_get_contents($url, false, $context);
+        if ($result === FALSE) {
+            return false;
+        }
+
+        $response = json_decode($result, true);
+        $toxicityScore = $response['attributeScores']['TOXICITY']['summaryScore']['value'] ?? 0;
+
+        return $toxicityScore >= 0.7;
+    }
+
+    public function insert_message($user_id, $message) {
+        // Перевіряємо, чи користувач забанений
+        $query = "SELECT violations, ban_until FROM user_bans WHERE user_id = :user_id";
+        $stmt = $this->connect->prepare($query);
+        $stmt->execute(['user_id' => $user_id]);
+        $banInfo = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($banInfo) {
+            $currentTime = new DateTime();
+            $banUntil = $banInfo['ban_until'] ? new DateTime($banInfo['ban_until']) : null;
+
+            if ($banUntil && $currentTime < $banUntil) {
+                return false; // Користувач ще в бані
+            }
+        }
+
+        // Перевіряємо, чи токсичне повідомлення
+        if ($this->is_toxic($message)) {
+            if ($banInfo) {
+                $violations = $banInfo['violations'] + 1;
+            } else {
+                $violations = 1;
+            }
+
+            if ($violations >= 3) {
+                $banTime = new DateTime();
+                $banTime->modify('+2 minutes'); // Бан на 2 хвилини
+                $banUntilStr = $banTime->format('Y-m-d H:i:s');
+
+                $query = "INSERT INTO user_bans (user_id, violations, ban_until) 
+                      VALUES (:user_id, :violations, :ban_until)
+                      ON DUPLICATE KEY UPDATE violations = :violations, ban_until = :ban_until";
+                $stmt = $this->connect->prepare($query);
+                $stmt->execute(['user_id' => $user_id, 'violations' => $violations, 'ban_until' => $banUntilStr]);
+
+                return false; // Користувач отримав бан
+            } else {
+                // Оновлюємо кількість порушень
+                $query = "INSERT INTO user_bans (user_id, violations) 
+                      VALUES (:user_id, :violations)
+                      ON DUPLICATE KEY UPDATE violations = :violations";
+                $stmt = $this->connect->prepare($query);
+                $stmt->execute(['user_id' => $user_id, 'violations' => $violations]);
+
+                return false; // Токсичне повідомлення не додаємо
+            }
+        }
+
+        // Якщо не токсично, зберігаємо повідомлення
+        $query = "INSERT INTO chatrooms (user_id, message, created_on) VALUES (:user_id, :message, NOW())";
+        $stmt = $this->connect->prepare($query);
+        $stmt->execute(['user_id' => $user_id, 'message' => $message]);
+
+        return true;
+    }
 }
 	
 ?>

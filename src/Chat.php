@@ -126,7 +126,6 @@ class Chat implements MessageComponentInterface {
         }
         else
         {
-            //group chat
 
             $chat_object = new \ChatRooms;
 
