@@ -411,7 +411,5 @@ class ChatUser
 
 }
 
-
-
 ?>
 

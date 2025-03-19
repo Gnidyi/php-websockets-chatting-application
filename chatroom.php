@@ -131,8 +131,8 @@ $user_data = $user_object->get_user_all_data();
 				</div>
 				<form method="post" id="chat_form" data-parsley-errors-container="#validation_error">
 					<div class="input-group mb-3">
-						<textarea class="form-control" id="chat_message" name="chat_message" placeholder="Type Message Here" data-parsley-maxlength="1000" data-parsley-pattern="/^[a-zA-Z0-9\s]+$/" required></textarea>
-						<div class="input-group-append">
+                        <textarea class="form-control" id="chat_message" name="chat_message" placeholder="Type Message Here" data-parsley-maxlength="1000" required></textarea>
+                        <div class="input-group-append">
 							<button type="submit" name="send" id="send" class="btn btn-primary"><i class="fa fa-paper-plane"></i></button>
 						</div>
 					</div>
@@ -198,92 +198,112 @@ $user_data = $user_object->get_user_all_data();
 	</div>
 </body>
 <script type="text/javascript">
-	
-	$(document).ready(function(){
+    $(document).ready(function(){
+        var conn = new WebSocket('ws://localhost:8080');
+        var user_id = $('#login_user_id').val();
+        var violations = {};
 
-		var conn = new WebSocket('ws://localhost:8080');
-		conn.onopen = function(e) {
-		    console.log("Connection established!");
-		};
+        conn.onopen = function(e) {
+            console.log("Connection established!");
+        };
 
-		conn.onmessage = function(e) {
-		    console.log(e.data);
+        conn.onmessage = function(e) {
+            console.log(e.data);
+            var data = JSON.parse(e.data);
 
-		    var data = JSON.parse(e.data);
+            var row_class = (data.from == 'Me') ? 'row justify-content-start' : 'row justify-content-end';
+            var background_class = (data.from == 'Me') ? 'text-dark alert-light' : 'alert-success';
 
-		    var row_class = '';
+            var html_data = `
+            <div class="${row_class}">
+                <div class="col-sm-10">
+                    <div class="shadow-sm alert ${background_class}">
+                        <b>${data.from} - </b>${data.msg}<br />
+                        <div class="text-right"><small><i>${data.dt}</i></small></div>
+                    </div>
+                </div>
+            </div>`;
+            $('#messages_area').append(html_data);
+            $("#chat_message").val("");
+            $('#messages_area').scrollTop($('#messages_area')[0].scrollHeight);
+        };
 
-		    var background_class = '';
+        async function checkToxicity(message) {
+            const apiKey = "AIzaSyCcvILtOkLlrx6lnhcS83NO2BGhzf5WzNM";
+            const url = `https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze?key=${apiKey}`;
 
-		    if(data.from == 'Me')
-		    {
-		    	row_class = 'row justify-content-start';
-		    	background_class = 'text-dark alert-light';
-		    }
-		    else
-		    {
-		    	row_class = 'row justify-content-end';
-		    	background_class = 'alert-success';
-		    }
+            const requestBody = {
+                comment: { text: message },
+                languages: ["en"],
+                requestedAttributes: { TOXICITY: {} }
+            };
 
-		    var html_data = "<div class='"+row_class+"'><div class='col-sm-10'><div class='shadow-sm alert "+background_class+"'><b>"+data.from+" - </b>"+data.msg+"<br /><div class='text-right'><small><i>"+data.dt+"</i></small></div></div></div></div>";
+            try {
+                const response = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(requestBody)
+                });
 
-		    $('#messages_area').append(html_data);
+                const data = await response.json();
+                const toxicityScore = data.attributeScores.TOXICITY.summaryScore.value;
 
-		    $("#chat_message").val("");
-		};
+                console.log(`Toxicity: ${toxicityScore}`);
 
-		$('#chat_form').parsley();
+                return toxicityScore >= 0.7; // Якщо токсичність >= 70%, блокуємо
+            } catch (error) {
+                console.error("Perspective API error:", error);
+                return false; // Якщо API не працює, не блокуємо
+            }
+        }
 
-		$('#messages_area').scrollTop($('#messages_area')[0].scrollHeight);
+        $('#chat_form').on('submit', async function(event){
+            event.preventDefault();
 
-		$('#chat_form').on('submit', function(event){
+            if ($('#chat_form').parsley().isValid()) {
+                var message = $('#chat_message').val();
 
-			event.preventDefault();
+                if (violations[user_id] >= 3) {
+                    alert("You have been blocked due to repeated violations.");
+                    return;
+                }
 
-			if($('#chat_form').parsley().isValid())
-			{
+                const isToxic = await checkToxicity(message);
+                if (isToxic) {
+                    alert("Your message could be considered offensive. Please edit it.");
 
-				var user_id = $('#login_user_id').val();
+                    violations[user_id] = (violations[user_id] || 0) + 1;
 
-				var message = $('#chat_message').val();
+                    if (violations[user_id] >= 3) {
+                        alert("You have been temporarily blocked from sending messages.");
+                    }
 
-				var data = {
-					userId : user_id,
-					msg : message
-				};
+                    return;
+                }
 
-				conn.send(JSON.stringify(data));
+                var data = { userId: user_id, msg: message };
+                console.log("Message sent:", data);
 
-				$('#messages_area').scrollTop($('#messages_area')[0].scrollHeight);
+                conn.send(JSON.stringify(data));
+                $('#messages_area').scrollTop($('#messages_area')[0].scrollHeight);
+            }
+        });
 
-			}
+        $('#logout').click(function(){
+            $.ajax({
+                url:"action.php",
+                method:"POST",
+                data:{user_id:user_id, action:'leave'},
+                success:function(data) {
+                    var response = JSON.parse(data);
+                    if(response.status == 1) {
+                        conn.close();
+                        location = 'index.php';
+                    }
+                }
+            });
+        });
 
-		});
-		
-		$('#logout').click(function(){
-
-			user_id = $('#login_user_id').val();
-
-			$.ajax({
-				url:"action.php",
-				method:"POST",
-				data:{user_id:user_id, action:'leave'},
-				success:function(data)
-				{
-					var response = JSON.parse(data);
-
-					if(response.status == 1)
-					{
-						conn.close();
-						location = 'index.php';
-					}
-				}
-			})
-
-		});
-
-	});
-	
+    });
 </script>
 </html>
